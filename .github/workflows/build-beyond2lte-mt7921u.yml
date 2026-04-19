@@ -86,48 +86,25 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
+      
           BUILDER_DIR="${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
           mkdir -p "${BUILDER_DIR}"
-
-          # Prefer repo-provided local.config if present, otherwise create one.
+      
           if [ -f "${GITHUB_WORKSPACE}/nh_files/local.config" ]; then
             cp "${GITHUB_WORKSPACE}/nh_files/local.config" "${BUILDER_DIR}/local.config"
           else
-            cat > "${BUILDER_DIR}/local.config" <<'EOF'
-             DEVICE=beyond2lte
-             KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig
-             KERNEL_CONFIG=build.config.universal9820
-             ANYKERNEL3_DIR=
-             PATCH_MAKEFILE=false
-             PATCH_NETHUNTER=true
-             PATCH_WIRELESS=false
-             EOF
+            printf "%s\n" \
+            "DEVICE=beyond2lte" \
+            "KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig" \
+            "KERNEL_CONFIG=build.config.universal9820" \
+            "ANYKERNEL3_DIR=" \
+            "PATCH_MAKEFILE=false" \
+            "PATCH_NETHUNTER=true" \
+            "PATCH_WIRELESS=false" \
+            > "${BUILDER_DIR}/local.config"
           fi
-
-          echo
-          echo "==== local.config before normalization ===="
-          cat "${BUILDER_DIR}/local.config" || true
-
-          # Force the target assumptions the user asked for.
-          sed -i 's/^DEVICE=.*/DEVICE=beyond2lte/' "${BUILDER_DIR}/local.config" || true
-
-          # If KERNEL_DEFCONFIG already exists, rewrite it to beyond2lte.
-          if grep -q '^KERNEL_DEFCONFIG=' "${BUILDER_DIR}/local.config"; then
-            sed -i 's/^KERNEL_DEFCONFIG=.*/KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig/' "${BUILDER_DIR}/local.config"
-          else
-            printf '\nKERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig\n' >> "${BUILDER_DIR}/local.config"
-          fi
-
-          # Prefer universal9820 build config if not already specified.
-          if grep -q '^KERNEL_CONFIG=' "${BUILDER_DIR}/local.config"; then
-            sed -i 's|^KERNEL_CONFIG=.*|KERNEL_CONFIG=build.config.universal9820|' "${BUILDER_DIR}/local.config"
-          else
-            printf 'KERNEL_CONFIG=build.config.universal9820\n' >> "${BUILDER_DIR}/local.config"
-          fi
-
-          echo
-          echo "==== local.config after normalization ===="
+      
+          echo "==== local.config ===="
           cat "${BUILDER_DIR}/local.config"
 
       - name: Inject MT7921U stack toggles into defconfig/build config
