@@ -1,4 +1,4 @@
-name: Build NetHunter Kernel (beyond2lte + mt7921u stack)
+name: Build NetHunter Kernel (beyond2lte + mt7921u backports)
 
 on:
   workflow_dispatch:
@@ -34,11 +34,14 @@ env:
   ANDROID_FLAVOR: ${{ github.event.inputs.android_flavor }}
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   BUILD_LOG: ${{ github.workspace }}/build.log
+  BACKPORTS_URL: https://cdn.kernel.org/pub/linux/kernel/projects/backports/stable/v6.1.97/backports-6.1.97-1.tar.xz
+  BACKPORTS_DIR: ${{ github.workspace }}/backports
+  ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Checkout kernel tree
@@ -57,7 +60,7 @@ jobs:
             bc bison build-essential ccache clang cmake curl flex gawk gcc git \
             git-lfs libelf-dev libncurses-dev libssl-dev lld llvm lz4 pahole \
             python3 python3-pip rsync unzip wget xz-utils zip zstd \
-            device-tree-compiler ca-certificates
+            device-tree-compiler ca-certificates kmod cpio
 
       - name: Show tree info
         shell: bash
@@ -73,6 +76,9 @@ jobs:
           echo
           echo "NetHunter builder:"
           ls -la kali-nethunter-kernel-builder || true
+          echo
+          echo "Likely defconfigs:"
+          find arch/arm64/configs -type f | grep -E 'beyond|universal9820|exynos9820' || true
 
       - name: Enable ccache
         if: ${{ github.event.inputs.enable_ccache == 'true' }}
@@ -86,10 +92,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-      
+
           BUILDER_DIR="${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
           mkdir -p "${BUILDER_DIR}"
-      
+
           if [ -f "${GITHUB_WORKSPACE}/nh_files/local.config" ]; then
             cp "${GITHUB_WORKSPACE}/nh_files/local.config" "${BUILDER_DIR}/local.config"
           else
@@ -103,156 +109,202 @@ jobs:
             "PATCH_WIRELESS=false" \
             > "${BUILDER_DIR}/local.config"
           fi
-      
-          echo "==== local.config ===="
+
+          sed -i 's/^DEVICE=.*/DEVICE=beyond2lte/' "${BUILDER_DIR}/local.config" || true
+
+          if grep -q '^KERNEL_DEFCONFIG=' "${BUILDER_DIR}/local.config"; then
+            sed -i 's/^KERNEL_DEFCONFIG=.*/KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig/' "${BUILDER_DIR}/local.config"
+          else
+            printf '%s\n' 'KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig' >> "${BUILDER_DIR}/local.config"
+          fi
+
+          if grep -q '^KERNEL_CONFIG=' "${BUILDER_DIR}/local.config"; then
+            sed -i 's|^KERNEL_CONFIG=.*|KERNEL_CONFIG=build.config.universal9820|' "${BUILDER_DIR}/local.config"
+          else
+            printf '%s\n' 'KERNEL_CONFIG=build.config.universal9820' >> "${BUILDER_DIR}/local.config"
+          fi
+
+          echo "==== final local.config ===="
           cat "${BUILDER_DIR}/local.config"
 
-      - name: Inject MT7921U stack toggles into defconfig/build config
+      - name: Download and extract backports (6.1.97)
         shell: bash
         run: |
           set -euxo pipefail
 
-          # Try to locate likely config targets.
-          CONFIG_CANDIDATES=()
-          while IFS= read -r f; do CONFIG_CANDIDATES+=("$f"); done < <(find arch/arm64/configs -type f | grep -E 'beyond2|exynos9820|universal9820|defconfig' || true)
+          cd "${GITHUB_WORKSPACE}"
+          wget -O backports.tar.xz "${BACKPORTS_URL}"
+          tar -xf backports.tar.xz
+          mv backports-6.1.97-1 backports
 
-          printf 'Config candidates:\n'
-          printf '%s\n' "${CONFIG_CANDIDATES[@]}" || true
+          echo "==== backports top level ===="
+          ls -la "${BACKPORTS_DIR}"
 
-          # Create a fragment that enables the whole wireless stack as modules.
-          cat > "${GITHUB_WORKSPACE}/mt7921u-stack.fragment" <<'EOF'
-           CONFIG_MODULES=y
-           CONFIG_MODULE_UNLOAD=y
-           CONFIG_CFG80211=m
-           CONFIG_MAC80211=m
-           CONFIG_WLAN=y
-           CONFIG_WLAN_VENDOR_MEDIATEK=y
-           CONFIG_MT76_CORE=m
-           CONFIG_MT76_USB=m
-           CONFIG_MT76_CONNAC_LIB=m
-           CONFIG_MT76_CONNAC_MAC=m
-           CONFIG_MT76_LEDS=y
-           CONFIG_MT792x_LIB=m
-           CONFIG_MT7921_COMMON=m
-           CONFIG_MT7921E=m
-           CONFIG_MT7921S=m
-           CONFIG_MT7921U=m
-           EOF
-
-          echo "==== fragment ===="
-          cat "${GITHUB_WORKSPACE}/mt7921u-stack.fragment"
-
-          # Best-effort patch: append fragment to likely defconfigs.
-          for cfg in "${CONFIG_CANDIDATES[@]}"; do
-            if [ -f "$cfg" ]; then
-              echo
-              echo "---- Patching $cfg ----"
-              while IFS= read -r line; do
-                key="${line%%=*}"
-                key="${key#\# }"
-                [ -z "$key" ] && continue
-                sed -i "/^${key}=.*/d" "$cfg" || true
-                sed -i "/^# ${key} is not set/d" "$cfg" || true
-              done < "${GITHUB_WORKSPACE}/mt7921u-stack.fragment"
-              cat "${GITHUB_WORKSPACE}/mt7921u-stack.fragment" >> "$cfg"
-            fi
-          done
-
-       - name: Download and extract backports (6.1.97)
-         shell: bash
-         run: |
-           set -euxo pipefail
-
-           cd $GITHUB_WORKSPACE
-
-           wget https://cdn.kernel.org/pub/linux/kernel/projects/backports/stable/v6.1.97/backports-6.1.97-1.tar.xz
-
-           tar -xf backports-6.1.97-1.tar.xz
-
-           mv backports-6.1.97-1 backports
-
-           ls -la backports" -maxdepth 2 -type f | sort | sed -n '1,120p'
-
-      - name: Sanity patch Kconfig glue
+      - name: Prepare backports config
         shell: bash
         run: |
           set -euxo pipefail
 
-          TOP_KCONFIG="drivers/net/wireless/Kconfig"
-          TOP_MAKEFILE="drivers/net/wireless/Makefile"
+          cd "${BACKPORTS_DIR}"
 
-          if [ -f "$TOP_KCONFIG" ] && ! grep -q 'source "drivers/net/wireless/mediatek/Kconfig"' "$TOP_KCONFIG"; then
-            printf '\nsource "drivers/net/wireless/mediatek/Kconfig"\n' >> "$TOP_KCONFIG"
-          fi
+          make defconfig-wifi || make defconfig
 
-          if [ -f "$TOP_MAKEFILE" ] && ! grep -q 'obj-\$(CONFIG_WLAN_VENDOR_MEDIATEK)' "$TOP_MAKEFILE"; then
-            printf '\nobj-$(CONFIG_WLAN_VENDOR_MEDIATEK) += mediatek/\n' >> "$TOP_MAKEFILE"
-          fi
+          python3 - <<'PY'
+from pathlib import Path
 
-          echo "==== wireless Kconfig tail ===="
-          tail -n 30 "$TOP_KCONFIG" || true
-          echo "==== wireless Makefile tail ===="
-          tail -n 30 "$TOP_MAKEFILE" || true
-          
-      - name: Prepare backports build (mt7921u stack)
+cfg = Path(".config")
+wanted = {
+    "CONFIG_CFG80211": "m",
+    "CONFIG_MAC80211": "m",
+    "CONFIG_WLAN": "y",
+    "CONFIG_WLAN_VENDOR_MEDIATEK": "y",
+    "CONFIG_MT76_CORE": "m",
+    "CONFIG_MT76_USB": "m",
+    "CONFIG_MT76_CONNAC_LIB": "m",
+    "CONFIG_MT76_CONNAC_MAC": "m",
+    "CONFIG_MT76_LEDS": "y",
+    "CONFIG_MT792x_LIB": "m",
+    "CONFIG_MT7921_COMMON": "m",
+    "CONFIG_MT7921U": "m",
+}
+
+lines = []
+if cfg.exists():
+    lines = cfg.read_text().splitlines()
+
+filtered = []
+for line in lines:
+    keep = True
+    for key in wanted:
+        if line.startswith(key + "=") or line.startswith("# " + key + " is not set"):
+            keep = False
+            break
+    if keep:
+        filtered.append(line)
+
+for key, val in wanted.items():
+    filtered.append(f"{key}={val}")
+
+cfg.write_text("\n".join(filtered) + "\n")
+PY
+
+          echo "==== backports .config ===="
+          grep -E 'CONFIG_(CFG80211|MAC80211|WLAN_VENDOR_MEDIATEK|MT76|MT7921|MT792)' .config || true
+
+      - name: Try to locate kernel build output hints
         shell: bash
         run: |
-         set -euxo pipefail
+          set -euxo pipefail
 
-         cd backports
+          echo "==== candidate build configs ===="
+          find . -maxdepth 2 -type f | grep 'build.config' || true
 
-         # Clean
-         make defconfig-wifi
+          echo "==== looking for out dirs ===="
+          find . -maxdepth 3 -type d | grep -E '/out$|/out/|kernel_platform|msm-kernel' || true
 
-         # Enable mt7921u stack
-         ./scripts/kconfig/merge_config.sh .config <<EOF
-          CONFIG_CFG80211=m
-          CONFIG_MAC80211=m
-          CONFIG_WLAN=y
-          CONFIG_MT76_CORE=m
-          CONFIG_MT76_USB=m
-          CONFIG_MT76_CONNAC_LIB=m
-          CONFIG_MT76_CONNAC_MAC=m
-          CONFIG_MT792x_LIB=m
-          CONFIG_MT7921_COMMON=m
-          CONFIG_MT7921U=m
-          EOF
-
-          make olddefconfig
-          
       - name: Build NetHunter kernel
         shell: bash
         run: |
           set -euxo pipefail
           cd "${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
           chmod +x ./build.sh
-
-          # Capture full log.
           ./build.sh 2>&1 | tee "${BUILD_LOG}"
 
-      - name: Collect artifacts
+      - name: Discover kernel output tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/out"
+            "${GITHUB_WORKSPACE}/kernel_platform/out"
+            "${GITHUB_WORKSPACE}/kernel_platform/msm-kernel/out"
+            "${GITHUB_WORKSPACE}/common/out"
+          )
+
+          FOUND=""
+          for d in "${CANDIDATES[@]}"; do
+            if [ -d "$d" ]; then
+              FOUND="$d"
+              break
+            fi
+          done
+
+          if [ -z "${FOUND}" ]; then
+            FOUND="$(find "${GITHUB_WORKSPACE}" -type d -name out | head -n1 || true)"
+          fi
+
+          echo "KERNEL_OUT=${FOUND}" >> "${GITHUB_ENV}"
+          echo "Resolved KERNEL_OUT=${FOUND}"
+
+      - name: Build backports against produced kernel tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [ -z "${KERNEL_OUT:-}" ] || [ ! -d "${KERNEL_OUT:-/nonexistent}" ]; then
+            echo "Kernel output directory not found"
+            exit 1
+          fi
+
+          cd "${BACKPORTS_DIR}"
+
+          KLIB_BUILD="${KERNEL_OUT}"
+          KLIB="${KERNEL_OUT}"
+
+          echo "Using KLIB_BUILD=${KLIB_BUILD}"
+          echo "Using KLIB=${KLIB}"
+
+          make -j"$(nproc)" KLIB_BUILD="${KLIB_BUILD}" KLIB="${KLIB}" 2>&1 | tee -a "${BUILD_LOG}"
+
+      - name: Collect built backports modules
         if: always()
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+
+          mkdir -p "${ARTIFACTS_DIR}/backports-modules"
+
+          find "${BACKPORTS_DIR}" -type f -name "*.ko" -exec cp {} "${ARTIFACTS_DIR}/backports-modules/" \; || true
+
+          echo "==== backports modules ===="
+          find "${ARTIFACTS_DIR}/backports-modules" -type f | sort || true
+
+      - name: Collect kernel artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "${ARTIFACTS_DIR}/kernel"
 
           find "${GITHUB_WORKSPACE}" -type f \( \
             -iname "*.zip" -o \
             -iname "*.img" -o \
-            -iname "*.ko" -o \
             -iname "Image*" -o \
             -iname "dtb*" -o \
             -iname "dtbo*" \) \
             -not -path "*/.git/*" \
-            -exec cp --parents {} "${GITHUB_WORKSPACE}/artifacts/" \; || true
+            -not -path "*/backports/*" \
+            -exec cp --parents {} "${ARTIFACTS_DIR}/kernel/" \; || true
 
           if [ -f "${BUILD_LOG}" ]; then
-            cp "${BUILD_LOG}" "${GITHUB_WORKSPACE}/artifacts/" || true
+            cp "${BUILD_LOG}" "${ARTIFACTS_DIR}/" || true
           fi
 
-          echo "==== Collected artifacts ===="
-          find "${GITHUB_WORKSPACE}/artifacts" -type f | sort || true
+          echo "==== collected artifacts ===="
+          find "${ARTIFACTS_DIR}" -type f | sort || true
+
+      - name: Create modules zip
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "${ARTIFACTS_DIR}"
+          if [ -d backports-modules ]; then
+            zip -r "mt7921u-backports-modules-${{ github.run_number }}.zip" backports-modules || true
+          fi
 
       - name: Upload flashable zip + modules + images
         if: always()
