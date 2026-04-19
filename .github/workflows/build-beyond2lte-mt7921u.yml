@@ -1,0 +1,292 @@
+name: Build NetHunter Kernel (beyond2lte + mt7921u stack)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "Kernel branch to build"
+        required: true
+        default: "nethunter-lineage-23.2"
+      device_codename:
+        description: "Device codename"
+        required: true
+        default: "beyond2lte"
+      android_flavor:
+        description: "ROM/Android flavor label"
+        required: true
+        default: "lineage-23.2"
+      enable_ccache:
+        description: "Enable ccache"
+        required: true
+        default: "true"
+      package_logs:
+        description: "Upload logs artifact"
+        required: true
+        default: "true"
+
+permissions:
+  contents: read
+
+env:
+  TZ: UTC
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch }}
+  DEVICE_CODENAME: ${{ github.event.inputs.device_codename }}
+  ANDROID_FLAVOR: ${{ github.event.inputs.android_flavor }}
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  BUILD_LOG: ${{ github.workspace }}/build.log
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout kernel tree
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.KERNEL_BRANCH }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc bison build-essential ccache clang cmake curl flex gawk gcc git \
+            git-lfs libelf-dev libncurses-dev libssl-dev lld llvm lz4 pahole \
+            python3 python3-pip rsync unzip wget xz-utils zip zstd \
+            device-tree-compiler ca-certificates
+
+      - name: Show tree info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Top level:"
+          ls -la
+          echo
+          echo "build.config files:"
+          find . -maxdepth 2 -type f | grep 'build.config' || true
+          echo
+          echo "NetHunter builder:"
+          ls -la kali-nethunter-kernel-builder || true
+
+      - name: Enable ccache
+        if: ${{ github.event.inputs.enable_ccache == 'true' }}
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-${{ env.DEVICE_CODENAME }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ env.DEVICE_CODENAME }}-
+
+      - name: Prepare local.config for beyond2lte build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          BUILDER_DIR="${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
+          mkdir -p "${BUILDER_DIR}"
+
+          # Prefer repo-provided local.config if present, otherwise create one.
+          if [ -f "${GITHUB_WORKSPACE}/nh_files/local.config" ]; then
+            cp "${GITHUB_WORKSPACE}/nh_files/local.config" "${BUILDER_DIR}/local.config"
+          else
+            cat > "${BUILDER_DIR}/local.config" <<'EOF'
+             DEVICE=beyond2lte
+             KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig
+             KERNEL_CONFIG=build.config.universal9820
+             ANYKERNEL3_DIR=
+             PATCH_MAKEFILE=false
+             PATCH_NETHUNTER=true
+             PATCH_WIRELESS=false
+             EOF
+          fi
+
+          echo
+          echo "==== local.config before normalization ===="
+          cat "${BUILDER_DIR}/local.config" || true
+
+          # Force the target assumptions the user asked for.
+          sed -i 's/^DEVICE=.*/DEVICE=beyond2lte/' "${BUILDER_DIR}/local.config" || true
+
+          # If KERNEL_DEFCONFIG already exists, rewrite it to beyond2lte.
+          if grep -q '^KERNEL_DEFCONFIG=' "${BUILDER_DIR}/local.config"; then
+            sed -i 's/^KERNEL_DEFCONFIG=.*/KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig/' "${BUILDER_DIR}/local.config"
+          else
+            printf '\nKERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig\n' >> "${BUILDER_DIR}/local.config"
+          fi
+
+          # Prefer universal9820 build config if not already specified.
+          if grep -q '^KERNEL_CONFIG=' "${BUILDER_DIR}/local.config"; then
+            sed -i 's|^KERNEL_CONFIG=.*|KERNEL_CONFIG=build.config.universal9820|' "${BUILDER_DIR}/local.config"
+          else
+            printf 'KERNEL_CONFIG=build.config.universal9820\n' >> "${BUILDER_DIR}/local.config"
+          fi
+
+          echo
+          echo "==== local.config after normalization ===="
+          cat "${BUILDER_DIR}/local.config"
+
+      - name: Inject MT7921U stack toggles into defconfig/build config
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Try to locate likely config targets.
+          CONFIG_CANDIDATES=()
+          while IFS= read -r f; do CONFIG_CANDIDATES+=("$f"); done < <(find arch/arm64/configs -type f | grep -E 'beyond2|exynos9820|universal9820|defconfig' || true)
+
+          printf 'Config candidates:\n'
+          printf '%s\n' "${CONFIG_CANDIDATES[@]}" || true
+
+          # Create a fragment that enables the whole wireless stack as modules.
+          cat > "${GITHUB_WORKSPACE}/mt7921u-stack.fragment" <<'EOF'
+           CONFIG_MODULES=y
+           CONFIG_MODULE_UNLOAD=y
+           CONFIG_CFG80211=m
+           CONFIG_MAC80211=m
+           CONFIG_WLAN=y
+           CONFIG_WLAN_VENDOR_MEDIATEK=y
+           CONFIG_MT76_CORE=m
+           CONFIG_MT76_USB=m
+           CONFIG_MT76_CONNAC_LIB=m
+           CONFIG_MT76_CONNAC_MAC=m
+           CONFIG_MT76_LEDS=y
+           CONFIG_MT792x_LIB=m
+           CONFIG_MT7921_COMMON=m
+           CONFIG_MT7921E=m
+           CONFIG_MT7921S=m
+           CONFIG_MT7921U=m
+           EOF
+
+          echo "==== fragment ===="
+          cat "${GITHUB_WORKSPACE}/mt7921u-stack.fragment"
+
+          # Best-effort patch: append fragment to likely defconfigs.
+          for cfg in "${CONFIG_CANDIDATES[@]}"; do
+            if [ -f "$cfg" ]; then
+              echo
+              echo "---- Patching $cfg ----"
+              while IFS= read -r line; do
+                key="${line%%=*}"
+                key="${key#\# }"
+                [ -z "$key" ] && continue
+                sed -i "/^${key}=.*/d" "$cfg" || true
+                sed -i "/^# ${key} is not set/d" "$cfg" || true
+              done < "${GITHUB_WORKSPACE}/mt7921u-stack.fragment"
+              cat "${GITHUB_WORKSPACE}/mt7921u-stack.fragment" >> "$cfg"
+            fi
+          done
+
+      - name: Import backport sources from Linux v6.1.97
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TMP_MAINLINE="${RUNNER_TEMP}/linux-mainline"
+          git clone --depth=1 --branch v6.1.97 https://github.com/torvalds/linux.git "${TMP_MAINLINE}"
+
+          # Copy MediaTek mt76 stack if absent or stale in target tree.
+          mkdir -p drivers/net/wireless/mediatek
+          rsync -a --delete \
+            "${TMP_MAINLINE}/drivers/net/wireless/mediatek/mt76/" \
+            "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/mt76/"
+
+          # Copy wireless stack dependencies from net/mac80211 and cfg80211 if desired.
+          # Kept conservative: only copy if directories exist in target tree.
+          if [ -d "${GITHUB_WORKSPACE}/net/mac80211" ]; then
+            rsync -a \
+              "${TMP_MAINLINE}/net/mac80211/" \
+              "${GITHUB_WORKSPACE}/net/mac80211/"
+          fi
+
+          if [ -d "${GITHUB_WORKSPACE}/net/wireless" ]; then
+            rsync -a \
+              "${TMP_MAINLINE}/net/wireless/" \
+              "${GITHUB_WORKSPACE}/net/wireless/"
+          fi
+
+          # Copy Kconfig/Makefile glue for MediaTek WLAN subtree.
+          mkdir -p drivers/net/wireless/mediatek
+          cp -f "${TMP_MAINLINE}/drivers/net/wireless/mediatek/Kconfig" \
+                "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/Kconfig"
+          cp -f "${TMP_MAINLINE}/drivers/net/wireless/mediatek/Makefile" \
+                "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/Makefile"
+
+          echo "==== Imported mt76 tree ===="
+          find "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/mt76" -maxdepth 2 -type f | sort | sed -n '1,120p'
+
+      - name: Sanity patch Kconfig glue
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TOP_KCONFIG="drivers/net/wireless/Kconfig"
+          TOP_MAKEFILE="drivers/net/wireless/Makefile"
+
+          if [ -f "$TOP_KCONFIG" ] && ! grep -q 'source "drivers/net/wireless/mediatek/Kconfig"' "$TOP_KCONFIG"; then
+            printf '\nsource "drivers/net/wireless/mediatek/Kconfig"\n' >> "$TOP_KCONFIG"
+          fi
+
+          if [ -f "$TOP_MAKEFILE" ] && ! grep -q 'obj-\$(CONFIG_WLAN_VENDOR_MEDIATEK)' "$TOP_MAKEFILE"; then
+            printf '\nobj-$(CONFIG_WLAN_VENDOR_MEDIATEK) += mediatek/\n' >> "$TOP_MAKEFILE"
+          fi
+
+          echo "==== wireless Kconfig tail ===="
+          tail -n 30 "$TOP_KCONFIG" || true
+          echo "==== wireless Makefile tail ===="
+          tail -n 30 "$TOP_MAKEFILE" || true
+
+      - name: Build NetHunter kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
+          chmod +x ./build.sh
+
+          # Capture full log.
+          ./build.sh 2>&1 | tee "${BUILD_LOG}"
+
+      - name: Collect artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+
+          find "${GITHUB_WORKSPACE}" -type f \( \
+            -iname "*.zip" -o \
+            -iname "*.img" -o \
+            -iname "*.ko" -o \
+            -iname "Image*" -o \
+            -iname "dtb*" -o \
+            -iname "dtbo*" \) \
+            -not -path "*/.git/*" \
+            -exec cp --parents {} "${GITHUB_WORKSPACE}/artifacts/" \; || true
+
+          if [ -f "${BUILD_LOG}" ]; then
+            cp "${BUILD_LOG}" "${GITHUB_WORKSPACE}/artifacts/" || true
+          fi
+
+          echo "==== Collected artifacts ===="
+          find "${GITHUB_WORKSPACE}/artifacts" -type f | sort || true
+
+      - name: Upload flashable zip + modules + images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nethunter-beyond2lte-mt7921u-${{ github.run_number }}
+          path: artifacts/**
+          if-no-files-found: warn
+          compression-level: 6
+
+      - name: Upload build log separately
+        if: ${{ always() && github.event.inputs.package_logs == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: ${{ env.BUILD_LOG }}
+          if-no-files-found: warn
