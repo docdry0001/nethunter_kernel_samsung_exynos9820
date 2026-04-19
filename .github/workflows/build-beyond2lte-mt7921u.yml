@@ -158,43 +158,20 @@ jobs:
             fi
           done
 
-      - name: Import backport sources from Linux v6.1.97
-        shell: bash
-        run: |
-          set -euxo pipefail
+       - name: Download and extract backports (6.1.97)
+         shell: bash
+         run: |
+           set -euxo pipefail
 
-          TMP_MAINLINE="${RUNNER_TEMP}/linux-mainline"
-          git clone --depth=1 --branch v6.1.97 https://github.com/torvalds/linux.git "${TMP_MAINLINE}"
+           cd $GITHUB_WORKSPACE
 
-          # Copy MediaTek mt76 stack if absent or stale in target tree.
-          mkdir -p drivers/net/wireless/mediatek
-          rsync -a --delete \
-            "${TMP_MAINLINE}/drivers/net/wireless/mediatek/mt76/" \
-            "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/mt76/"
+           wget https://cdn.kernel.org/pub/linux/kernel/projects/backports/stable/v6.1.97/backports-6.1.97-1.tar.xz
 
-          # Copy wireless stack dependencies from net/mac80211 and cfg80211 if desired.
-          # Kept conservative: only copy if directories exist in target tree.
-          if [ -d "${GITHUB_WORKSPACE}/net/mac80211" ]; then
-            rsync -a \
-              "${TMP_MAINLINE}/net/mac80211/" \
-              "${GITHUB_WORKSPACE}/net/mac80211/"
-          fi
+           tar -xf backports-6.1.97-1.tar.xz
 
-          if [ -d "${GITHUB_WORKSPACE}/net/wireless" ]; then
-            rsync -a \
-              "${TMP_MAINLINE}/net/wireless/" \
-              "${GITHUB_WORKSPACE}/net/wireless/"
-          fi
+           mv backports-6.1.97-1 backports
 
-          # Copy Kconfig/Makefile glue for MediaTek WLAN subtree.
-          mkdir -p drivers/net/wireless/mediatek
-          cp -f "${TMP_MAINLINE}/drivers/net/wireless/mediatek/Kconfig" \
-                "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/Kconfig"
-          cp -f "${TMP_MAINLINE}/drivers/net/wireless/mediatek/Makefile" \
-                "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/Makefile"
-
-          echo "==== Imported mt76 tree ===="
-          find "${GITHUB_WORKSPACE}/drivers/net/wireless/mediatek/mt76" -maxdepth 2 -type f | sort | sed -n '1,120p'
+           ls -la backports" -maxdepth 2 -type f | sort | sed -n '1,120p'
 
       - name: Sanity patch Kconfig glue
         shell: bash
@@ -216,7 +193,33 @@ jobs:
           tail -n 30 "$TOP_KCONFIG" || true
           echo "==== wireless Makefile tail ===="
           tail -n 30 "$TOP_MAKEFILE" || true
+          
+      - name: Prepare backports build (mt7921u stack)
+        shell: bash
+        run: |
+         set -euxo pipefail
 
+         cd backports
+
+         # Clean
+         make defconfig-wifi
+
+         # Enable mt7921u stack
+         ./scripts/kconfig/merge_config.sh .config <<EOF
+          CONFIG_CFG80211=m
+          CONFIG_MAC80211=m
+          CONFIG_WLAN=y
+          CONFIG_MT76_CORE=m
+          CONFIG_MT76_USB=m
+          CONFIG_MT76_CONNAC_LIB=m
+          CONFIG_MT76_CONNAC_MAC=m
+          CONFIG_MT792x_LIB=m
+          CONFIG_MT7921_COMMON=m
+          CONFIG_MT7921U=m
+          EOF
+
+          make olddefconfig
+          
       - name: Build NetHunter kernel
         shell: bash
         run: |
