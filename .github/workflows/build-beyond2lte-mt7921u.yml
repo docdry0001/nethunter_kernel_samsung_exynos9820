@@ -127,70 +127,45 @@ jobs:
           echo "==== final local.config ===="
           cat "${BUILDER_DIR}/local.config"
 
-      - name: Download and extract backports (6.1.97)
+      - name: Prepare backports config 
         shell: bash
         run: |
           set -euxo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-          wget -O backports.tar.xz "${BACKPORTS_URL}"
-          tar -xf backports.tar.xz
-          mv backports-6.1.97-1 backports
-
-          echo "==== backports top level ===="
-          ls -la "${BACKPORTS_DIR}"
-
-      - name: Prepare backports config
-        shell: bash
-        run: |
-          set -euxo pipefail
-
+      
           cd "${BACKPORTS_DIR}"
-
+      
           make defconfig-wifi || make defconfig
-
-          python3 - <<'PY'
-from pathlib import Path
-
-cfg = Path(".config")
-wanted = {
-    "CONFIG_CFG80211": "m",
-    "CONFIG_MAC80211": "m",
-    "CONFIG_WLAN": "y",
-    "CONFIG_WLAN_VENDOR_MEDIATEK": "y",
-    "CONFIG_MT76_CORE": "m",
-    "CONFIG_MT76_USB": "m",
-    "CONFIG_MT76_CONNAC_LIB": "m",
-    "CONFIG_MT76_CONNAC_MAC": "m",
-    "CONFIG_MT76_LEDS": "y",
-    "CONFIG_MT792x_LIB": "m",
-    "CONFIG_MT7921_COMMON": "m",
-    "CONFIG_MT7921U": "m",
-}
-
-lines = []
-if cfg.exists():
-    lines = cfg.read_text().splitlines()
-
-filtered = []
-for line in lines:
-    keep = True
-    for key in wanted:
-        if line.startswith(key + "=") or line.startswith("# " + key + " is not set"):
-            keep = False
-            break
-    if keep:
-        filtered.append(line)
-
-for key, val in wanted.items():
-    filtered.append(f"{key}={val}")
-
-cfg.write_text("\n".join(filtered) + "\n")
-PY
-
-          echo "==== backports .config ===="
-          grep -E 'CONFIG_(CFG80211|MAC80211|WLAN_VENDOR_MEDIATEK|MT76|MT7921|MT792)' .config || true
-
+      
+          CONFIG_FILE=".config"
+      
+          # function to set config safely
+          set_cfg () {
+            KEY="$1"
+            VAL="$2"
+      
+            sed -i "/^${KEY}=.*/d" "${CONFIG_FILE}" || true
+            sed -i "/^# ${KEY} is not set/d" "${CONFIG_FILE}" || true
+      
+            echo "${KEY}=${VAL}" >> "${CONFIG_FILE}"
+          }
+      
+          set_cfg CONFIG_CFG80211 m
+          set_cfg CONFIG_MAC80211 m
+          set_cfg CONFIG_WLAN y
+          set_cfg CONFIG_WLAN_VENDOR_MEDIATEK y
+          set_cfg CONFIG_MT76_CORE m
+          set_cfg CONFIG_MT76_USB m
+          set_cfg CONFIG_MT76_CONNAC_LIB m
+          set_cfg CONFIG_MT76_CONNAC_MAC m
+          set_cfg CONFIG_MT76_LEDS y
+          set_cfg CONFIG_MT792x_LIB m
+          set_cfg CONFIG_MT7921_COMMON m
+          set_cfg CONFIG_MT7921U m
+      
+          make olddefconfig
+      
+          echo "==== final backports .config ===="
+          grep -E 'CONFIG_(CFG80211|MAC80211|MT76|MT7921)' .config || true
       - name: Try to locate kernel build output hints
         shell: bash
         run: |
