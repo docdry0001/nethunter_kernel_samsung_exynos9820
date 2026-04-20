@@ -266,9 +266,9 @@ jobs:
            LLVM_IAS=1 \
            2>&1 | tee build.log
            
-       - name: Prepare kernel for module build
-         shell: bash
-         run: |
+      - name: Prepare kernel for module build
+        shell: bash
+        run: |
           set -euxo pipefail
 
           KERNEL_OUT="${KERNEL_OUT}"
