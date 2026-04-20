@@ -368,17 +368,54 @@ jobs:
           echo "==== collected artifacts ===="
           find "${ARTIFACTS_DIR}" -type f | sort || true
 
-      - name: Create backports modules zip
-        if: always()
+      - name: Create MT7921 Modules zip (FIXED)
+        id: create_zip
         shell: bash
         run: |
-          set -euxo pipefail
-
-          cd "${ARTIFACTS_DIR}"
-          if [ -d backports-modules ]; then
-            zip -r "mt7921u-backports-modules-${{ github.run_number }}.zip" backports-modules || true
+          set -euo pipefail
+      
+          CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+          COMMON="$CONFIG_DIR/kernel_platform/common"
+          OUT="$COMMON/out"
+      
+          ZIP_OUT="$CONFIG_DIR/artifacts/mt7921_modules.zip"
+      
+          mkdir -p "$CONFIG_DIR/artifacts"
+          rm -f "$ZIP_OUT"
+      
+          echo "[*] Finding modules directory..."
+      
+          MOD_DIR="$(find "$OUT" -type d -path "*/lib/modules/*" | head -n1)"
+      
+          if [ -z "$MOD_DIR" ]; then
+            echo "::error::Modules directory not found"
+            find "$OUT" -maxdepth 4 -type d
+            exit 1
           fi
-
+      
+          echo "[*] Using modules from: $MOD_DIR"
+      
+          TMP_DIR="$OUT/mt7921_modules"
+          rm -rf "$TMP_DIR"
+          mkdir -p "$TMP_DIR"
+      
+          # --- CORE WIFI STACK ---
+          cp -v "$MOD_DIR/kernel/net/wireless/cfg80211.ko" "$TMP_DIR/" || true
+          cp -v "$MOD_DIR/kernel/net/mac80211/mac80211.ko" "$TMP_DIR/" || true
+      
+          # --- MT76 + MT7921 ---
+          if [ -d "$MOD_DIR/kernel/drivers/net/wireless/mediatek/mt76" ]; then
+            find "$MOD_DIR/kernel/drivers/net/wireless/mediatek/mt76" -type f -name "*.ko" \
+              -exec cp -v {} "$TMP_DIR/" \;
+          fi
+      
+          echo "[*] Final module list:"
+          ls -lah "$TMP_DIR"
+      
+          cd "$TMP_DIR"
+          zip -r "$ZIP_OUT" .
+      
+          echo "[*] Created zip: $ZIP_OUT"
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
