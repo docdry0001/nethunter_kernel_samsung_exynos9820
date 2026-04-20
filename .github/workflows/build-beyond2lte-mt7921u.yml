@@ -236,22 +236,35 @@ jobs:
           echo "==== final backports .config ===="
           grep -E 'CONFIG_(CFG80211|MAC80211|WLAN_VENDOR_MEDIATEK|MT76|MT792)' .config || true
 
-      - name: Build NetHunter kernel
+      - name: Build kernel only (no NetHunter)
         shell: bash
         run: |
           set -euxo pipefail
-          export TERM=xterm
 
-          cd "${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
-          chmod +x ./build.sh
+          export ARCH=arm64
+          export SUBARCH=arm64
 
-          {
-            sleep 2
-            echo S
-            sleep 2
-            echo N
-            sleep 2
-          } | ./build.sh 2>&1 | tee "${BUILD_LOG}"
+          # toolchain (builder-ից վերցնում ենք env)
+          export CLANG_PATH="$PWD/kali-nethunter-kernel-builder/toolchains/clang-10.0/bin"
+
+          # fallback եթե չկա
+          if [ ! -d "$CLANG_PATH" ]; then
+           echo "Clang not found, using system clang"
+           CLANG_PATH="/usr/bin"
+          fi
+
+          export PATH="$CLANG_PATH:$PATH"
+
+          # kernel build
+          make O=out ARCH=arm64 exynos9820-beyond2lte_defconfig
+
+          make -j$(nproc) \
+           O=out \
+           ARCH=arm64 \
+           CC=clang \
+           LLVM=1 \
+           LLVM_IAS=1 \
+           2>&1 | tee build.log
 
       - name: Discover kernel output tree
         shell: bash
