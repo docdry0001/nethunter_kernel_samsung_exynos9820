@@ -240,9 +240,18 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          export TERM=xterm
+
           cd "${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
           chmod +x ./build.sh
-          ./build.sh 2>&1 | tee "${BUILD_LOG}"
+
+          {
+            sleep 2
+            echo S
+            sleep 2
+            echo N
+            sleep 2
+          } | ./build.sh 2>&1 | tee "${BUILD_LOG}"
 
       - name: Discover kernel output tree
         shell: bash
