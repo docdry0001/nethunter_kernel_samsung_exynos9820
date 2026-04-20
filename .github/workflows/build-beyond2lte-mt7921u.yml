@@ -265,7 +265,20 @@ jobs:
            LLVM=1 \
            LLVM_IAS=1 \
            2>&1 | tee build.log
+           
+       - name: Prepare kernel for module build
+         shell: bash
+         run: |
+          set -euxo pipefail
 
+          KERNEL_OUT="${KERNEL_OUT}"
+
+          cd "${KERNEL_OUT}"
+
+          make ARCH=arm64 oldconfig
+          make ARCH=arm64 prepare
+          make ARCH=arm64 modules_prepare
+          
       - name: Discover kernel output tree
         shell: bash
         run: |
