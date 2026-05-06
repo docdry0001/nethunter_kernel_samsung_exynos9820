@@ -1,0 +1,85 @@
+# .github/workflows/build-kernel-samsung.yml
+name: Build NetHunter Kernel (Samsung Exynos 9820)
+
+on:
+  push:
+    branches: [ "main", "nethunter-lineage-23.2" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive       # Բեռնենք kali-nethunter-kernel-builder-ը
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu flex bison bc \
+                                  libssl-dev device-tree-compiler
+
+      - name: Set Environment
+        run: |
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "KERNEL_DIR=${{ github.workspace }}" >> $GITHUB_ENV
+
+      - name: Configure Kernel (NetHunter features)
+        run: |
+          # Հիմնական defconfig
+          make ${{ env.ARCH }} universal9820_Q_defconfig
+          
+          # NetHunter-ի համար անհրաժեշտ բոլոր մոդուլները
+          scripts/config --enable CONFIG_USB_F_ACM
+          scripts/config --enable CONFIG_USB_F_SERIAL
+          scripts/config --enable CONFIG_USB_F_ECM
+          scripts/config --enable CONFIG_USB_F_EEM
+          scripts/config --enable CONFIG_USB_F_RNDIS
+          scripts/config --enable CONFIG_USB_F_HID
+          scripts/config --enable CONFIG_USB_CONFIGFS_F_HID
+          scripts/config --enable CONFIG_HIDRAW
+          scripts/config --enable CONFIG_NETFILTER
+          scripts/config --enable CONFIG_NETFILTER_XT_MATCH_OWNER
+          # WiFi monitor + packet injection (համոզվեք, որ ձեր WiFi-չիպի դրայվերն ակտիվ է)
+          scripts/config --enable CONFIG_CFG80211
+          scripts/config --enable CONFIG_MAC80211
+          
+          make ${{ env.ARCH }} olddefconfig
+
+      - name: Build Kernel
+        run: |
+          make -j$(nproc) ${{ env.ARCH }} \
+               CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+               Image.gz-dtb modules dtbs
+
+      - name: Build External WiFi Driver (RTL8812AU)
+        run: |
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8812au.git external/rtl8812au
+          cd external/rtl8812au
+          make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+               -C ${{ env.KERNEL_DIR }} M=$PWD modules
+          cd ../..
+
+      - name: Build External WiFi Driver (RTL88x2BU)
+        run: |
+          git clone --depth=1 https://github.com/morrownr/88x2bu.git external/rtl88x2bu
+          cd external/rtl88x2bu
+          make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+               -C ${{ env.KERNEL_DIR }} M=$PWD modules
+          cd ../..
+
+      - name: Collect Artifacts
+        run: |
+          mkdir -p release/modules
+          cp arch/arm64/boot/Image.gz-dtb release/
+          find arch/arm64/boot/dts -name "*.dtb" -exec cp {} release/ \;
+          find . -name "*.ko" -exec cp {} release/modules/ \;
+          
+      - name: Upload Kernel Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-exynos9820-${{ github.run_id }}
+          path: release/
