@@ -151,9 +151,9 @@ jobs:
           sed -i 's/^DEVICE=.*/DEVICE=beyond2lte/' "${BUILDER_DIR}/local.config" || true
 
           if grep -q '^KERNEL_DEFCONFIG=' "${BUILDER_DIR}/local.config"; then
-            sed -i 's/^KERNEL_DEFCONFIG=.*/KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig/' "${BUILDER_DIR}/local.config"
+            sed -i 's/^KERNEL_DEFCONFIG=.*/KERNEL_DEFCONFIG=nethunter_beyond2lte_defconfig/' "${BUILDER_DIR}/local.config"
           else
-            printf '%s\n' 'KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig' >> "${BUILDER_DIR}/local.config"
+            printf '%s\n' 'KERNEL_DEFCONFIG=nethunter_beyond2lte_defconfig' >> "${BUILDER_DIR}/local.config"
           fi
 
           if grep -q '^KERNEL_CONFIG=' "${BUILDER_DIR}/local.config"; then
