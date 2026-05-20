@@ -1,47 +1,100 @@
-- name: Build kernel with NetHunter defconfig
-  shell: bash
-  run: |
-    set -euxo pipefail
+name: Build NetHunter Kernel Beyond2LTE
 
-    WORKSPACE="${GITHUB_WORKSPACE}"
-    KERNEL_OUT="$WORKSPACE/out"
-    BACKPORTS_DIR="$WORKSPACE/backports"
-    ARTIFACTS_DIR="$WORKSPACE/artifacts"
-    ANYKERNEL_DIR="$WORKSPACE/anykernel"
+on:
+  workflow_dispatch:
+    inputs:
+      upload_defconfig:
+        description: 'Upload your exynos9820-beyond2lte_defconfig'
+        required: true
+        type: string
 
-    mkdir -p "$KERNEL_OUT" "$BACKPORTS_DIR" "$ARTIFACTS_DIR" "$ANYKERNEL_DIR"
+jobs:
+  build_kernel:
+    runs-on: ubuntu-latest
+    env:
+      WORKSPACE: ${{ github.workspace }}
+      KERNEL_DEFCONFIG: nh_files/exynos9820-beyond2lte_defconfig
+      BACKPORTS_URL: https://cdn.kernel.org/pub/linux/kernel/projects/backports/stable/v6.1.97/backports-6.1.97-1.tar.xz
+      BACKPORTS_DIR: ${{ github.workspace }}/backports
+      KERNEL_OUT: ${{ github.workspace }}/out
+      ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+      ANYKERNEL_DIR: ${{ github.workspace }}/anykernel
 
-    # Copy NetHunter defconfig for beyond2lte
-    cp nh_files/exynos9820-beyond2lte_defconfig "$KERNEL_OUT/.config"
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
-    # Prepare kernel
-    cd "$KERNEL_OUT"
-    make ARCH=arm64 oldconfig
-    make ARCH=arm64 prepare
-    make ARCH=arm64 modules_prepare
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget tar unzip bc build-essential libncurses-dev bison flex libssl-dev
 
-    # Compile kernel
-    make -j$(nproc) ARCH=arm64 2>&1 | tee build.log
+      - name: Prepare workspace
+        run: |
+          mkdir -p "$KERNEL_OUT" "$BACKPORTS_DIR" "$ARTIFACTS_DIR" "$ANYKERNEL_DIR"
 
-    # Backports (Wi-Fi)
-    cd "$BACKPORTS_DIR"
-    tar xf backports-6.1.97-1.tar.xz --strip-components=1
-    make ARCH=arm64 O="$BACKPORTS_DIR" \
-      KERNEL_DIR="$KERNEL_OUT" \
-      modules -j$(nproc)
+      - name: Copy defconfig
+        run: |
+          cp $KERNEL_DEFCONFIG "$KERNEL_OUT/.config"
 
-    # Collect .ko files
-    mkdir -p "$ARTIFACTS_DIR/backports-modules"
-    find "$BACKPORTS_DIR" -type f -name "*.ko" -exec cp {} "$ARTIFACTS_DIR/backports-modules/" \;
+      - name: Build kernel
+        run: |
+          set -euxo pipefail
+          cd "$KERNEL_OUT"
+          make ARCH=arm64 oldconfig
+          make ARCH=arm64 prepare
+          make ARCH=arm64 modules_prepare
+          make -j$(nproc) ARCH=arm64 2>&1 | tee build.log
 
-    # Create AnyKernel3 zip
-    git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
-    cp "$KERNEL_OUT/arch/arm64/boot/Image" "$ANYKERNEL_DIR/"
-    cp "$KERNEL_OUT/arch/arm64/boot/"*.dtb "$ANYKERNEL_DIR/" || true
-    cp "$KERNEL_OUT/arch/arm64/boot/dtbo.img" "$ANYKERNEL_DIR/" || true
-    cp "$ARTIFACTS_DIR/backports-modules/"*.ko "$ANYKERNEL_DIR/modules/system/lib/modules/" || true
-    sed -i 's/device.name1=.*/device.name1=beyond2lte/' "$ANYKERNEL_DIR/anykernel.sh"
-    sed -i 's/device.name2=.*/device.name2=SM-G975F/' "$ANYKERNEL_DIR/anykernel.sh"
-    cd "$ANYKERNEL_DIR"
-    zip -r9 "../beyond2lte-kernel-mt7921u.zip" *
-    mv ../beyond2lte-kernel-mt7921u.zip "$ARTIFACTS_DIR/"
+      - name: Download and extract backports
+        run: |
+          cd "$BACKPORTS_DIR"
+          if [ ! -f "backports-6.1.97-1.tar.xz" ]; then
+            wget $BACKPORTS_URL
+          fi
+          tar xf backports-6.1.97-1.tar.xz --strip-components=1
+
+      - name: Build backports modules
+        run: |
+          set -euxo pipefail
+          cd "$BACKPORTS_DIR"
+          make ARCH=arm64 O="$BACKPORTS_DIR" \
+            KERNEL_DIR="$KERNEL_OUT" \
+            CONFIG_MODULES=y \
+            CONFIG_CFG80211=m \
+            CONFIG_MAC80211=m \
+            CONFIG_MT76_CORE=m \
+            CONFIG_MT76_USB=m \
+            CONFIG_MT7921_COMMON=m \
+            CONFIG_MT7921U=m \
+            modules -j$(nproc) 2>&1 | tee backports.log
+
+      - name: Collect .ko files
+        run: |
+          mkdir -p "$ARTIFACTS_DIR/backports-modules"
+          find "$BACKPORTS_DIR" -type f -name "*.ko" -exec cp {} "$ARTIFACTS_DIR/backports-modules/" \;
+          echo "==== Backports modules ===="
+          ls -lh "$ARTIFACTS_DIR/backports-modules"
+
+      - name: Prepare AnyKernel3 zip
+        run: |
+          cd "$WORKSPACE"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+          cp "$KERNEL_OUT/arch/arm64/boot/Image" "$ANYKERNEL_DIR/"
+          cp "$KERNEL_OUT/arch/arm64/boot/"*.dtb "$ANYKERNEL_DIR/" || true
+          cp "$KERNEL_OUT/arch/arm64/boot/dtbo.img" "$ANYKERNEL_DIR/" || true
+          mkdir -p "$ANYKERNEL_DIR/modules/system/lib/modules"
+          cp "$ARTIFACTS_DIR/backports-modules/"*.ko "$ANYKERNEL_DIR/modules/system/lib/modules/" || true
+          sed -i 's/device.name1=.*/device.name1=beyond2lte/' "$ANYKERNEL_DIR/anykernel.sh"
+          sed -i 's/device.name2=.*/device.name2=SM-G975F/' "$ANYKERNEL_DIR/anykernel.sh"
+          cd "$ANYKERNEL_DIR"
+          zip -r9 "../beyond2lte-kernel-mt7921u.zip" *
+          mv ../beyond2lte-kernel-mt7921u.zip "$ARTIFACTS_DIR/"
+
+      - name: Upload kernel flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-flashable-zip
+          path: artifacts/beyond2lte-kernel-mt7921u.zip
