@@ -1,435 +1,47 @@
-name: Build NetHunter Kernel (beyond2lte + mt7921u backports)
+- name: Build kernel with NetHunter defconfig
+  shell: bash
+  run: |
+    set -euxo pipefail
 
-on:
-  workflow_dispatch:
-    inputs:
-      kernel_branch:
-        description: "Kernel branch to build"
-        required: true
-        default: "nethunter-lineage-23.2"
-      device_codename:
-        description: "Device codename"
-        required: true
-        default: "beyond2lte"
-      android_flavor:
-        description: "ROM/Android flavor label"
-        required: true
-        default: "lineage-23.2"
-      enable_ccache:
-        description: "Enable ccache"
-        required: true
-        default: "true"
-      package_logs:
-        description: "Upload build logs"
-        required: true
-        default: "true"
+    WORKSPACE="${GITHUB_WORKSPACE}"
+    KERNEL_OUT="$WORKSPACE/out"
+    BACKPORTS_DIR="$WORKSPACE/backports"
+    ARTIFACTS_DIR="$WORKSPACE/artifacts"
+    ANYKERNEL_DIR="$WORKSPACE/anykernel"
 
-permissions:
-  contents: read
+    mkdir -p "$KERNEL_OUT" "$BACKPORTS_DIR" "$ARTIFACTS_DIR" "$ANYKERNEL_DIR"
 
-env:
-  TZ: UTC
-  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch }}
-  DEVICE_CODENAME: ${{ github.event.inputs.device_codename }}
-  ANDROID_FLAVOR: ${{ github.event.inputs.android_flavor }}
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
-  BUILD_LOG: ${{ github.workspace }}/build.log
-  BACKPORTS_URL: https://cdn.kernel.org/pub/linux/kernel/projects/backports/stable/v6.1.97/backports-6.1.97-1.tar.xz
-  BACKPORTS_DIR: ${{ github.workspace }}/backports
-  ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+    # Copy NetHunter defconfig for beyond2lte
+    cp nh_files/exynos9820-beyond2lte_defconfig "$KERNEL_OUT/.config"
 
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    # Prepare kernel
+    cd "$KERNEL_OUT"
+    make ARCH=arm64 oldconfig
+    make ARCH=arm64 prepare
+    make ARCH=arm64 modules_prepare
 
-    steps:
-      - name: Checkout kernel tree
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.KERNEL_BRANCH }}
-          submodules: recursive
-          fetch-depth: 0
+    # Compile kernel
+    make -j$(nproc) ARCH=arm64 2>&1 | tee build.log
 
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            ccache \
-            clang \
-            cmake \
-            cpio \
-            curl \
-            device-tree-compiler \
-            flex \
-            gawk \
-            gcc \
-            git \
-            git-lfs \
-            kmod \
-            libelf-dev \
-            libncurses-dev \
-            libssl-dev \
-            lld \
-            llvm \
-            lz4 \
-            pahole \
-            python3 \
-            python3-pip \
-            rsync \
-            unzip \
-            wget \
-            xz-utils \
-            zip \
-            zstd \
-            ca-certificates
+    # Backports (Wi-Fi)
+    cd "$BACKPORTS_DIR"
+    tar xf backports-6.1.97-1.tar.xz --strip-components=1
+    make ARCH=arm64 O="$BACKPORTS_DIR" \
+      KERNEL_DIR="$KERNEL_OUT" \
+      modules -j$(nproc)
 
-      - name: Show tree info
-        shell: bash
-        run: |
-          set -euxo pipefail
-          echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
-          echo "Commit: $(git rev-parse HEAD)"
-          echo "Workspace: ${GITHUB_WORKSPACE}"
-          ls -la
-          echo "==== build.config files ===="
-          find . -maxdepth 2 -type f | grep 'build.config' || true
-          echo "==== likely defconfigs ===="
-          find arch/arm64/configs -type f | grep -E 'beyond|universal9820|exynos9820' || true
-          echo "==== builder dir ===="
-          ls -la kali-nethunter-kernel-builder || true
+    # Collect .ko files
+    mkdir -p "$ARTIFACTS_DIR/backports-modules"
+    find "$BACKPORTS_DIR" -type f -name "*.ko" -exec cp {} "$ARTIFACTS_DIR/backports-modules/" \;
 
-      - name: Enable ccache
-        if: ${{ github.event.inputs.enable_ccache == 'true' }}
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: ${{ runner.os }}-${{ env.DEVICE_CODENAME }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ env.DEVICE_CODENAME }}-
-
-      - name: Prepare local.config
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          BUILDER_DIR="${GITHUB_WORKSPACE}/kali-nethunter-kernel-builder"
-          mkdir -p "${BUILDER_DIR}"
-
-          if [ -f "${GITHUB_WORKSPACE}/nh_files/local.config" ]; then
-            cp "${GITHUB_WORKSPACE}/nh_files/local.config" "${BUILDER_DIR}/local.config"
-          else
-            printf "%s\n" \
-              "#!/bin/bash" \
-              "" \
-              "export ARCH=arm64" \
-              "export SUBARCH=arm64" \
-              "CLANG_SRC=\"https://kali.download/nethunter-images/toolchains/google_clang-10.0.4.tar.xz\"" \
-              "CLANG_SRC_TYPE=\"wget\"" \
-              "export CLANG_ROOT=\${TD}/clang-10.0" \
-              "CROSS_COMPILE_ARM32_SRC=\"https://kali.download/nethunter-images/toolchains/linaro-armhf-5.5.tar.xz\"" \
-              "CROSS_COMPILE_ARM32_TYPE=\"wget\"" \
-              "CCD32=\"\${TD}/linaro-armhf-5.5\"" \
-              "export CROSS_COMPILE_ARM32=\${CCD32}/bin/arm-linux-gnueabihf-" \
-              "CROSS_COMPILE_SRC=\"https://kali.download/nethunter-images/toolchains/linaro-aarch64-5.5.tar.xz\"" \
-              "CROSS_COMPILE_TYPE=\"wget\"" \
-              "CCD64=\"\${TD}/linaro-aarch64-5.5\"" \
-              "export CROSS_COMPILE=\${CCD64}/bin/aarch64-linux-gnu-" \
-              "MAKE_ARGS=\"CONFIG_NO_ERROR_ON_MISMATCH=y\"" \
-              "CCACHE=true" \
-              "export LOCALVERSION=-v0lk3n-beyond2lte_los-23.2" \
-              "DEVICE=beyond2lte" \
-              "KERNEL_DEFCONFIG=nethunter_beyond2lte_defconfig" \
-              "KERNEL_CONFIG=build.config.universal9820" \
-              > "${BUILDER_DIR}/local.config"
-          fi
-
-          sed -i 's/^DEVICE=.*/DEVICE=beyond2lte/' "${BUILDER_DIR}/local.config" || true
-
-          if grep -q '^KERNEL_DEFCONFIG=' "${BUILDER_DIR}/local.config"; then
-            sed -i 's/^KERNEL_DEFCONFIG=.*/KERNEL_DEFCONFIG=nethunter_beyond2lte_defconfig/' "${BUILDER_DIR}/local.config"
-          else
-            printf '%s\n' 'KERNEL_DEFCONFIG=nethunter_beyond2lte_defconfig' >> "${BUILDER_DIR}/local.config"
-          fi
-
-          if grep -q '^KERNEL_CONFIG=' "${BUILDER_DIR}/local.config"; then
-            sed -i 's|^KERNEL_CONFIG=.*|KERNEL_CONFIG=build.config.universal9820|' "${BUILDER_DIR}/local.config"
-          else
-            printf '%s\n' 'KERNEL_CONFIG=build.config.universal9820' >> "${BUILDER_DIR}/local.config"
-          fi
-
-          if grep -q '^export LOCALVERSION=' "${BUILDER_DIR}/local.config"; then
-            sed -i 's/^export LOCALVERSION=.*/export LOCALVERSION=-v0lk3n-beyond2lte_los-23.2/' "${BUILDER_DIR}/local.config"
-          else
-            printf '%s\n' 'export LOCALVERSION=-v0lk3n-beyond2lte_los-23.2' >> "${BUILDER_DIR}/local.config"
-          fi
-
-          echo "==== final local.config ===="
-          cat "${BUILDER_DIR}/local.config"
-
-      - name: Download and extract backports
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-          rm -rf "${BACKPORTS_DIR}" backports-* backports.tar.xz
-
-          wget https://cdn.kernel.org/pub/linux/kernel/projects/backports/stable/v6.1.97/backports-6.1.97-1.tar.xz
-          mv backports-6.1.97-1.tar.xz backports.tar.xz
-          tar -xf backports.tar.xz
-
-          EXTRACTED_DIR="$(find "${GITHUB_WORKSPACE}" -maxdepth 1 -mindepth 1 -type d -name 'backports-*' | head -n1)"
-
-          if [ -z "${EXTRACTED_DIR}" ]; then
-            echo "Backports extracted directory not found"
-            ls -la "${GITHUB_WORKSPACE}"
-            exit 1
-          fi
-
-          mv "${EXTRACTED_DIR}" "${BACKPORTS_DIR}"
-
-          echo "==== workspace after extraction ===="
-          ls -la "${GITHUB_WORKSPACE}"
-          echo "==== backports dir ===="
-          ls -la "${BACKPORTS_DIR}"
-
-      - name: Prepare backports config
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          [ -d "${BACKPORTS_DIR}" ] || { echo "BACKPORTS_DIR missing: ${BACKPORTS_DIR}"; ls -la "${GITHUB_WORKSPACE}"; exit 1; }
-
-          cd "${BACKPORTS_DIR}"
-
-          make defconfig-wifi || make defconfig
-
-          CONFIG_FILE=".config"
-
-          set_cfg() {
-            KEY="$1"
-            VAL="$2"
-            sed -i "/^${KEY}=.*/d" "${CONFIG_FILE}" || true
-            sed -i "/^# ${KEY} is not set/d" "${CONFIG_FILE}" || true
-            printf '%s=%s\n' "${KEY}" "${VAL}" >> "${CONFIG_FILE}"
-          }
-
-          set_cfg CONFIG_CFG80211 m
-          set_cfg CONFIG_MAC80211 m
-          set_cfg CONFIG_WLAN y
-          set_cfg CONFIG_WLAN_VENDOR_MEDIATEK y
-          set_cfg CONFIG_MT76_CORE m
-          set_cfg CONFIG_MT76_USB m
-          set_cfg CONFIG_MT76_CONNAC_LIB m
-          set_cfg CONFIG_MT76_CONNAC_MAC m
-          set_cfg CONFIG_MT76_LEDS y
-          set_cfg CONFIG_MT792x_LIB m
-          set_cfg CONFIG_MT7921_COMMON m
-          set_cfg CONFIG_MT7921U m
-
-          make olddefconfig
-
-          echo "==== final backports .config ===="
-          grep -E 'CONFIG_(CFG80211|MAC80211|WLAN_VENDOR_MEDIATEK|MT76|MT792)' .config || true
-
-      - name: Build kernel only (no NetHunter)
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          # toolchain (builder-ից վերցնում ենք env)
-          export CLANG_PATH="$PWD/kali-nethunter-kernel-builder/toolchains/clang-10.0/bin"
-
-          # fallback եթե չկա
-          if [ ! -d "$CLANG_PATH" ]; then
-           echo "Clang not found, using system clang"
-           CLANG_PATH="/usr/bin"
-          fi
-
-          export PATH="$CLANG_PATH:$PATH"
-
-          # kernel build
-          make O=out ARCH=arm64 exynos9820-beyond2lte_defconfig
-
-          make -j$(nproc) \
-           O=out \
-           ARCH=arm64 \
-           CC=clang \
-           LLVM=1 \
-           LLVM_IAS=1 \
-           2>&1 | tee build.log
-           
-      - name: Prepare kernel for module build
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          KERNEL_OUT="${KERNEL_OUT}"
-
-          cd "${KERNEL_OUT}"
-
-          make ARCH=arm64 oldconfig
-          make ARCH=arm64 prepare
-          make ARCH=arm64 modules_prepare
-          
-      - name: Discover kernel output tree
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          FOUND=""
-
-          CANDIDATES=(
-            "${GITHUB_WORKSPACE}/out"
-            "${GITHUB_WORKSPACE}/kernel_platform/out"
-            "${GITHUB_WORKSPACE}/kernel_platform/msm-kernel/out"
-            "${GITHUB_WORKSPACE}/common/out"
-            "${GITHUB_WORKSPACE}/arch/arm64/boot"
-          )
-
-          for d in "${CANDIDATES[@]}"; do
-            if [ -d "${d}" ]; then
-              FOUND="${d}"
-              break
-            fi
-          done
-
-          if [ -z "${FOUND}" ]; then
-            FOUND="$(find "${GITHUB_WORKSPACE}" -type d -name out | head -n1 || true)"
-          fi
-
-          if [ -z "${FOUND}" ]; then
-            echo "Could not locate kernel output tree"
-            find "${GITHUB_WORKSPACE}" -maxdepth 4 -type d | sort | sed -n '1,300p'
-            exit 1
-          fi
-
-          echo "KERNEL_OUT=${FOUND}" >> "${GITHUB_ENV}"
-          echo "Resolved KERNEL_OUT=${FOUND}"
-
-      - name: Build backports modules
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          [ -d "${BACKPORTS_DIR}" ] || { echo "BACKPORTS_DIR missing"; exit 1; }
-          [ -d "${KERNEL_OUT}" ] || { echo "KERNEL_OUT missing: ${KERNEL_OUT}"; exit 1; }
-
-          cd "${BACKPORTS_DIR}"
-
-          make -j"$(nproc)" \
-            KLIB_BUILD="${KERNEL_OUT}" \
-            KLIB="${KERNEL_OUT}" \
-            2>&1 | tee -a "${BUILD_LOG}"
-
-      - name: Collect backports modules
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p "${ARTIFACTS_DIR}/backports-modules"
-
-          find "${BACKPORTS_DIR}" -type f -name '*.ko' -exec cp {} "${ARTIFACTS_DIR}/backports-modules/" \; || true
-
-          echo "==== backports modules ===="
-          find "${ARTIFACTS_DIR}/backports-modules" -type f | sort || true
-
-      - name: Collect kernel artifacts
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p "${ARTIFACTS_DIR}/kernel"
-
-          find "${GITHUB_WORKSPACE}" -type f \( \
-            -iname '*.zip' -o \
-            -iname '*.img' -o \
-            -iname 'Image*' -o \
-            -iname 'dtb*' -o \
-            -iname 'dtbo*' \
-          \) \
-            -not -path '*/.git/*' \
-            -not -path '*/backports/*' \
-            -exec cp --parents {} "${ARTIFACTS_DIR}/kernel/" \; || true
-
-          if [ -f "${BUILD_LOG}" ]; then
-            cp "${BUILD_LOG}" "${ARTIFACTS_DIR}/" || true
-          fi
-
-          echo "==== collected artifacts ===="
-          find "${ARTIFACTS_DIR}" -type f | sort || true
-
-      - name: Create MT7921 Modules zip (FIXED)
-        id: create_zip
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-          COMMON="$CONFIG_DIR/kernel_platform/common"
-          OUT="$COMMON/out"
-      
-          ZIP_OUT="$CONFIG_DIR/artifacts/mt7921_modules.zip"
-      
-          mkdir -p "$CONFIG_DIR/artifacts"
-          rm -f "$ZIP_OUT"
-      
-          echo "[*] Finding modules directory..."
-      
-          MOD_DIR="$(find "$OUT" -type d -path "*/lib/modules/*" | head -n1)"
-      
-          if [ -z "$MOD_DIR" ]; then
-            echo "::error::Modules directory not found"
-            find "$OUT" -maxdepth 4 -type d
-            exit 1
-          fi
-      
-          echo "[*] Using modules from: $MOD_DIR"
-      
-          TMP_DIR="$OUT/mt7921_modules"
-          rm -rf "$TMP_DIR"
-          mkdir -p "$TMP_DIR"
-      
-          # --- CORE WIFI STACK ---
-          cp -v "$MOD_DIR/kernel/net/wireless/cfg80211.ko" "$TMP_DIR/" || true
-          cp -v "$MOD_DIR/kernel/net/mac80211/mac80211.ko" "$TMP_DIR/" || true
-      
-          # --- MT76 + MT7921 ---
-          if [ -d "$MOD_DIR/kernel/drivers/net/wireless/mediatek/mt76" ]; then
-            find "$MOD_DIR/kernel/drivers/net/wireless/mediatek/mt76" -type f -name "*.ko" \
-              -exec cp -v {} "$TMP_DIR/" \;
-          fi
-      
-          echo "[*] Final module list:"
-          ls -lah "$TMP_DIR"
-      
-          cd "$TMP_DIR"
-          zip -r "$ZIP_OUT" .
-      
-          echo "[*] Created zip: $ZIP_OUT"
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nethunter-beyond2lte-mt7921u-${{ github.run_number }}
-          path: artifacts/**
-          if-no-files-found: warn
-          compression-level: 6
-
-      - name: Upload build log separately
-        if: ${{ always() && github.event.inputs.package_logs == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ github.run_number }}
-          path: ${{ env.BUILD_LOG }}
-          if-no-files-found: warn
+    # Create AnyKernel3 zip
+    git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+    cp "$KERNEL_OUT/arch/arm64/boot/Image" "$ANYKERNEL_DIR/"
+    cp "$KERNEL_OUT/arch/arm64/boot/"*.dtb "$ANYKERNEL_DIR/" || true
+    cp "$KERNEL_OUT/arch/arm64/boot/dtbo.img" "$ANYKERNEL_DIR/" || true
+    cp "$ARTIFACTS_DIR/backports-modules/"*.ko "$ANYKERNEL_DIR/modules/system/lib/modules/" || true
+    sed -i 's/device.name1=.*/device.name1=beyond2lte/' "$ANYKERNEL_DIR/anykernel.sh"
+    sed -i 's/device.name2=.*/device.name2=SM-G975F/' "$ANYKERNEL_DIR/anykernel.sh"
+    cd "$ANYKERNEL_DIR"
+    zip -r9 "../beyond2lte-kernel-mt7921u.zip" *
+    mv ../beyond2lte-kernel-mt7921u.zip "$ARTIFACTS_DIR/"
