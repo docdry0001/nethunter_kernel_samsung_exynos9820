@@ -179,7 +179,8 @@ jobs:
           cd "${GITHUB_WORKSPACE}"
           rm -rf "${BACKPORTS_DIR}" backports-* backports.tar.xz
 
-          wget -O backports.tar.xz "${BACKPORTS_URL}"
+          wget https://cdn.kernel.org/pub/linux/kernel/projects/backports/stable/v6.1.97/backports-6.1.97-1.tar.xz
+          mv backports-6.1.97-1.tar.xz backports.tar.xz
           tar -xf backports.tar.xz
 
           EXTRACTED_DIR="$(find "${GITHUB_WORKSPACE}" -maxdepth 1 -mindepth 1 -type d -name 'backports-*' | head -n1)"
