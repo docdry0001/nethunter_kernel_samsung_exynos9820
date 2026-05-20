@@ -143,7 +143,7 @@ jobs:
               "CCACHE=true" \
               "export LOCALVERSION=-v0lk3n-beyond2lte_los-23.2" \
               "DEVICE=beyond2lte" \
-              "KERNEL_DEFCONFIG=exynos9820-beyond2lte_defconfig" \
+              "KERNEL_DEFCONFIG=nethunter_beyond2lte_defconfig" \
               "KERNEL_CONFIG=build.config.universal9820" \
               > "${BUILDER_DIR}/local.config"
           fi
