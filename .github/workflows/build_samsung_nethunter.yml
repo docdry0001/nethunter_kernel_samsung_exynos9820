@@ -30,7 +30,7 @@ jobs:
       - name: Configure Kernel (NetHunter features)
         run: |
           # Հիմնական defconfig
-          make ${{ env.ARCH }} universal9820_Q_defconfig
+          make ${{ env.ARCH }} nethunter_beyond2lte_defconfig
           
           # NetHunter-ի համար անհրաժեշտ բոլոր մոդուլները
           scripts/config --enable CONFIG_USB_F_ACM
@@ -47,7 +47,7 @@ jobs:
           scripts/config --enable CONFIG_CFG80211
           scripts/config --enable CONFIG_MAC80211
           
-          make ${{ env.ARCH }} olddefconfig
+          make ${{ env.ARCH }} nethunter_beyond2lte_defconfig
 
       - name: Build Kernel
         run: |
