@@ -1,4 +1,3 @@
-# .github/workflows/build-kernel-samsung.yml
 name: Build NetHunter Kernel (Samsung Exynos 9820)
 
 on:
