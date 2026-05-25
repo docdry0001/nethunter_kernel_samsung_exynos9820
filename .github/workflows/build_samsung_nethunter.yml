@@ -29,22 +29,7 @@ jobs:
       - name: Configure Kernel (NetHunter features)
         run: |
           # Հիմնական defconfig
-          make ${{ env.ARCH }} nethunter_beyond2lte_defconfig
-          
-          # NetHunter-ի համար անհրաժեշտ բոլոր մոդուլները
-          scripts/config --enable CONFIG_USB_F_ACM
-          scripts/config --enable CONFIG_USB_F_SERIAL
-          scripts/config --enable CONFIG_USB_F_ECM
-          scripts/config --enable CONFIG_USB_F_EEM
-          scripts/config --enable CONFIG_USB_F_RNDIS
-          scripts/config --enable CONFIG_USB_F_HID
-          scripts/config --enable CONFIG_USB_CONFIGFS_F_HID
-          scripts/config --enable CONFIG_HIDRAW
-          scripts/config --enable CONFIG_NETFILTER
-          scripts/config --enable CONFIG_NETFILTER_XT_MATCH_OWNER
-          # WiFi monitor + packet injection (համոզվեք, որ ձեր WiFi-չիպի դրայվերն ակտիվ է)
-          scripts/config --enable CONFIG_CFG80211
-          scripts/config --enable CONFIG_MAC80211
+          cd /arch/arm64/configs
           
           make ${{ env.ARCH }} nethunter_beyond2lte_defconfig
 
